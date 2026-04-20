@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from guardian.data.event_log import EventLog
 from guardian.data.scam_db import ScamDatabase
+from guardian.data.scam_signals import ScamDbProvider, ScamSignalProvider
 from guardian.llm.heuristic import HeuristicLlmRuntime
 from guardian.llm.runtime import LlmRuntime
 from guardian.llm.tools import ToolCallStep, build_default_tool_registry
@@ -102,12 +103,18 @@ class RiskAgent:
     def __init__(
         self,
         *,
-        scam_db: ScamDatabase,
+        scam_db: ScamDatabase | None = None,
+        scam_signals: ScamSignalProvider | None = None,
         llm: LlmRuntime,
         intervention: InterventionAgent,
         event_log: EventLog,
     ) -> None:
-        self._db = scam_db
+        if scam_signals is None:
+            if scam_db is None:
+                raise TypeError("RiskAgent requires scam_db or scam_signals")
+            scam_signals = ScamDbProvider(scam_db)
+
+        self._signals = scam_signals
         self._llm = llm
         self._intervention = intervention
         self._log = event_log
@@ -164,7 +171,7 @@ class RiskAgent:
             try:
                 tools = (
                     build_default_tool_registry(
-                        db=self._db,
+                        provider=self._signals,
                         snapshot=snapshot,
                         trace_callback=trace_callback,
                     )
@@ -358,40 +365,71 @@ class RiskAgent:
         else:
             from_, text = None, None
 
-        db = self._db
+        provider = self._signals
         if from_ is not None:
-            lower_from = from_.lower()
-            for bad in db.bad_numbers():
-                if bad.value in lower_from:
-                    score += bad.weight
-                    contribs.append(
-                        RuleScoreContribution(
-                            feature="bad_number",
-                            value=bad.weight,
-                            detail=f"Sender {from_} on blocklist ({bad.tag})",
-                        )
+            lookup = provider.lookup_number(from_)
+            if bool(lookup.get("hit")):
+                try:
+                    weight = float(lookup.get("weight", 0.5))
+                except (TypeError, ValueError):
+                    weight = 0.5
+                tag = str(lookup.get("tag", "unknown"))
+                score += weight
+                contribs.append(
+                    RuleScoreContribution(
+                        feature="bad_number",
+                        value=weight,
+                        detail=f"Sender {from_} on blocklist ({tag})",
                     )
-                    reasons.append("Sender number is on a scam blocklist.")
+                )
+                reasons.append("Sender number is on a scam blocklist.")
 
         if text is not None:
-            lower = text.lower()
-            for d in db.bad_domains():
-                if d.value in lower:
-                    score += d.weight
+            domain_out = provider.check_domain(text)
+            matches = domain_out.get("matches")
+            if bool(domain_out.get("hit")) and isinstance(matches, list):
+                any_domain = False
+                for m in matches:
+                    if not isinstance(m, dict):
+                        continue
+                    domain = str(m.get("domain", "")).strip()
+                    if not domain:
+                        continue
+                    try:
+                        weight = float(m.get("weight", 0.5))
+                    except (TypeError, ValueError):
+                        weight = 0.5
+                    score += weight
+                    any_domain = True
                     contribs.append(
                         RuleScoreContribution(
                             feature="bad_domain",
-                            value=d.weight,
-                            detail=f"Message contains phishing domain {d.value}",
+                            value=weight,
+                            detail=f"Message contains phishing domain {domain}",
                         )
                     )
+                if any_domain:
                     reasons.append("Message contains a known phishing link.")
+
+            kw_out = provider.search_keywords(text)
+            hits_raw = kw_out.get("hits")
             kw_sum = 0.0
             hits: list[str] = []
-            for k in db.keywords():
-                if k.value in lower:
-                    kw_sum += k.weight
-                    hits.append(f'"{k.value}" ({k.tag})')
+            if isinstance(hits_raw, list):
+                for h in hits_raw:
+                    if not isinstance(h, dict):
+                        continue
+                    keyword = str(h.get("keyword", "")).strip()
+                    if not keyword:
+                        continue
+                    tag = str(h.get("tag", "unknown"))
+                    try:
+                        w = float(h.get("weight", 0.0))
+                    except (TypeError, ValueError):
+                        w = 0.0
+                    kw_sum += w
+                    hits.append(f'"{keyword}" ({tag})')
+
             if hits:
                 bounded = max(0.0, min(0.9, kw_sum * 0.5))
                 score += bounded
