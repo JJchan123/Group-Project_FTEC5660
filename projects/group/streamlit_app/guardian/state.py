@@ -25,6 +25,12 @@ from guardian.agents.risk_agent import RiskAgent
 from guardian.agents.user_settings import default_user_settings
 from guardian.data.event_log import EventLog
 from guardian.data.scam_db import ScamDatabase
+from guardian.data.scam_signals import (
+    FallbackProvider,
+    McpScamClient,
+    ScamDbProvider,
+    ScamSignalProvider,
+)
 from guardian.llm.runtime import SmartLlmRuntime
 from guardian.paths import SCAM_DB_CSV
 from guardian.scenarios.engine import ScenarioEngine
@@ -46,12 +52,13 @@ def bootstrap() -> None:
 
 def _initialize() -> None:
     scam_db = _load_scam_db()
+    scam_signals = _build_scam_signal_provider(scam_db)
     event_log = EventLog()
     intervention = InterventionAgent()
     llm = SmartLlmRuntime()
     llm.probe()
     risk = RiskAgent(
-        scam_db=scam_db,
+        scam_signals=scam_signals,
         llm=llm,
         intervention=intervention,
         event_log=event_log,
@@ -63,6 +70,7 @@ def _initialize() -> None:
     live_trace_store = LiveTraceStore()
 
     st.session_state["scam_db"] = scam_db
+    st.session_state["scam_signals"] = scam_signals
     st.session_state["event_log"] = event_log
     st.session_state["intervention"] = intervention
     st.session_state["llm"] = llm
@@ -78,6 +86,40 @@ def _initialize() -> None:
 @st.cache_resource
 def _load_scam_db() -> ScamDatabase:
     return ScamDatabase.from_csv(SCAM_DB_CSV.read_text(encoding="utf-8"))
+
+
+def _build_scam_signal_provider(scam_db: ScamDatabase) -> ScamSignalProvider:
+    """Create the scam-signal provider.
+
+    Env vars:
+    - GUARDIAN_MCP_ENDPOINT: base URL of the HTTP service (e.g. http://127.0.0.1:8765)
+    - GUARDIAN_MCP_TIMEOUT_S: request timeout in seconds (default 3.0)
+    - GUARDIAN_MCP_ENABLED: optional toggle (1/true/yes/on to enable)
+    - GUARDIAN_MCP_STRICT: if true, MCP is required; no local fallback is used
+    """
+
+    def _truthy(value: str) -> bool:
+        return value.strip().lower() in ("1", "true", "yes", "on")
+
+    endpoint = os.environ.get("GUARDIAN_MCP_ENDPOINT", "").strip()
+    enabled_raw = os.environ.get("GUARDIAN_MCP_ENABLED", "").strip()
+    enabled = _truthy(enabled_raw) if enabled_raw else bool(endpoint)
+
+    strict_raw = os.environ.get("GUARDIAN_MCP_STRICT", "").strip()
+    strict = _truthy(strict_raw) if strict_raw else False
+
+    try:
+        timeout_s = float(os.environ.get("GUARDIAN_MCP_TIMEOUT_S", "3.0"))
+    except ValueError:
+        timeout_s = 3.0
+
+    local = ScamDbProvider(scam_db)
+    if enabled and endpoint:
+        mcp = McpScamClient(endpoint, timeout_s=timeout_s)
+        if strict:
+            return mcp
+        return FallbackProvider(mcp=mcp, local=local)
+    return local
 
 
 def _run_ambient_loop() -> None:

@@ -37,6 +37,13 @@ setup:
 run:
     {{streamlit}} run streamlit_app/app.py
 
+# Launch the mock MCP server (HTTP) on http://127.0.0.1:<port>.
+# Examples:
+# - just mcp
+# - just mcp 8765
+mcp port="8765":
+    cd streamlit_app && ../{{python}} -m uvicorn mcp_server.server:app --reload --host 127.0.0.1 --port {{port}}
+
 # Launch + auto-play a scenario. Example: just play 04_urgent_transfer
 play scenario:
     GUARDIAN_AUTOPLAY={{scenario}} {{streamlit}} run streamlit_app/app.py

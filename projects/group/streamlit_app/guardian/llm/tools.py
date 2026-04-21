@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, create_model
 
-from guardian.data.scam_db import ScamDatabase
+from guardian.data.scam_signals import ScamSignalProvider
 from guardian.scenarios.events import (
     CallEvent,
     ChatEvent,
@@ -85,7 +85,7 @@ class ToolRegistry:
 
 def build_default_tool_registry(
     *,
-    db: ScamDatabase,
+    provider: ScamSignalProvider,
     snapshot: ContextSnapshot,
     trace_callback: TraceCallback | None = None,
 ) -> ToolRegistry:
@@ -114,7 +114,7 @@ def build_default_tool_registry(
                 },
                 trace=trace,
                 trace_callback=trace_callback,
-                call=lambda args: _lookup_number(db, args),
+                call=lambda args: _lookup_number(provider, args),
             ),
             _make_tool(
                 name="check_domain",
@@ -135,7 +135,7 @@ def build_default_tool_registry(
                 },
                 trace=trace,
                 trace_callback=trace_callback,
-                call=lambda args: _check_domain(db, args),
+                call=lambda args: _check_domain(provider, args),
             ),
             _make_tool(
                 name="search_keywords",
@@ -155,7 +155,7 @@ def build_default_tool_registry(
                 },
                 trace=trace,
                 trace_callback=trace_callback,
-                call=lambda args: _search_keywords(db, args),
+                call=lambda args: _search_keywords(provider, args),
             ),
             _make_tool(
                 name="get_history",
@@ -241,55 +241,28 @@ def _timed_call(
     )
 
 
-def _lookup_number(db: ScamDatabase, args: dict[str, Any]) -> dict[str, Any]:
-    raw = str(args.get("number", "")).lower()
-    for entry in db.bad_numbers():
-        if entry.value in raw:
-            return {
-                "hit": True,
-                "match": entry.value,
-                "tag": entry.tag,
-                "weight": entry.weight,
-                "note": entry.note,
-            }
-    return {"hit": False}
+def _lookup_number(
+    provider: ScamSignalProvider,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    number = str(args.get("number", ""))
+    return provider.lookup_number(number)
 
 
-def _check_domain(db: ScamDatabase, args: dict[str, Any]) -> dict[str, Any]:
-    text = str(args.get("text", "")).lower()
-    matches: list[dict[str, Any]] = []
-    for domain in db.bad_domains():
-        if domain.value in text:
-            matches.append(
-                {
-                    "domain": domain.value,
-                    "tag": domain.tag,
-                    "weight": domain.weight,
-                    "note": domain.note,
-                }
-            )
-    return {"hit": False} if not matches else {"hit": True, "matches": matches}
+def _check_domain(
+    provider: ScamSignalProvider,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    text = str(args.get("text", ""))
+    return provider.check_domain(text)
 
 
-def _search_keywords(db: ScamDatabase, args: dict[str, Any]) -> dict[str, Any]:
-    text = str(args.get("text", "")).lower()
-    hits: list[dict[str, Any]] = []
-    total = 0.0
-    for keyword in db.keywords():
-        if keyword.value in text:
-            hits.append(
-                {
-                    "keyword": keyword.value,
-                    "tag": keyword.tag,
-                    "weight": keyword.weight,
-                }
-            )
-            total += keyword.weight
-    return {
-        "count": len(hits),
-        "total_weight": round(total, 3),
-        "hits": hits,
-    }
+def _search_keywords(
+    provider: ScamSignalProvider,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    text = str(args.get("text", ""))
+    return provider.search_keywords(text)
 
 
 def _get_history(snapshot: ContextSnapshot) -> dict[str, Any]:
