@@ -8,6 +8,8 @@ import shutil
 from dataclasses import dataclass
 from typing import Any
 
+import chromadb
+from chromadb.config import Settings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 
@@ -31,11 +33,15 @@ class RagVectorStore:
     def __init__(self, config: RagConfig, embeddings: Any) -> None:
         self._config = config
         self._embeddings = embeddings
+        self._client: chromadb.ClientAPI | None = None
+        self._store_instance: Chroma | None = None
 
     def rebuild(self, documents: list[Document], manifest: dict[str, Any]) -> None:
         if self._config.index_dir.exists():
             shutil.rmtree(self._config.index_dir)
         self._config.index_dir.mkdir(parents=True, exist_ok=True)
+        self._client = None
+        self._store_instance = None
 
         store = self._store()
         if documents:
@@ -83,12 +89,22 @@ class RagVectorStore:
         return matches
 
     def _store(self) -> Chroma:
+        if self._store_instance is not None:
+            return self._store_instance
+
         self._config.index_dir.mkdir(parents=True, exist_ok=True)
-        return Chroma(
+        if self._client is None:
+            self._client = chromadb.PersistentClient(
+                path=str(self._config.index_dir),
+                settings=Settings(),
+            )
+        self._store_instance = Chroma(
             collection_name=COLLECTION_NAME,
             embedding_function=self._embeddings,
+            client=self._client,
             persist_directory=str(self._config.index_dir),
         )
+        return self._store_instance
 
 
 def _to_similarity_score(raw_score: float) -> float:
