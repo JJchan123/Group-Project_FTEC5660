@@ -169,6 +169,36 @@ def build_default_tool_registry(
                 trace_callback=trace_callback,
                 call=lambda args: _get_history(snapshot),
             ),
+            _make_tool(
+                name="check_beneficiary_for_bank_transfer",
+                description=(
+                    "Check beneficiary name match and prior risk reports for a "
+                    "bank transfer review. Returns {name_account_check, "
+                    "reported_risk_status} for the entered recipient name and "
+                    "account number."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "recipient_name": {
+                            "type": "string",
+                            "description": (
+                                "Recipient name entered on the bank transfer form."
+                            ),
+                        },
+                        "account_number": {
+                            "type": "string",
+                            "description": (
+                                "Beneficiary account number entered for the bank transfer."
+                            ),
+                        },
+                    },
+                    "required": ["recipient_name", "account_number"],
+                },
+                trace=trace,
+                trace_callback=trace_callback,
+                call=lambda args: _check_beneficiary_for_bank_transfer(provider, args),
+            ),
         ],
         trace=trace,
     )
@@ -300,6 +330,18 @@ def _get_history(snapshot: ContextSnapshot) -> dict[str, Any]:
         ),
         "prior_max_risk": round(snapshot.prior_max_risk, 3),
     }
+
+
+def _check_beneficiary_for_bank_transfer(
+    provider: ScamSignalProvider,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    recipient_name = str(args.get("recipient_name", ""))
+    account_number = str(args.get("account_number", ""))
+    return provider.check_beneficiary_for_bank_transfer(
+        recipient_name,
+        account_number,
+    )
 
 
 def _args_schema_for_tool(name: str, parameters: dict[str, Any]) -> type[BaseModel]:

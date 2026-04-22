@@ -509,6 +509,58 @@ class RiskAgent:
                         detail=f"SMS {s.seconds_since_last_sms}s ago",
                     )
                 )
+            beneficiary_out = provider.check_beneficiary_for_bank_transfer(
+                event.to_name,
+                event.to_account,
+            )
+            name_check = str(
+                beneficiary_out.get("name_account_check", "unknown")
+            ).strip()
+            risk_status = str(
+                beneficiary_out.get("reported_risk_status", "unknown")
+            ).strip()
+
+            if name_check == "mismatch":
+                txn += 0.35
+                contribs.append(
+                    RuleScoreContribution(
+                        feature="beneficiary_name_mismatch",
+                        value=0.35,
+                        detail="Bank transfer beneficiary name mismatches registry",
+                    )
+                )
+                reasons.append("Recipient name does not match the beneficiary account.")
+            elif name_check == "close_match":
+                txn += 0.12
+                contribs.append(
+                    RuleScoreContribution(
+                        feature="beneficiary_name_close_match",
+                        value=0.12,
+                        detail="Bank transfer beneficiary name is only a close match",
+                    )
+                )
+                reasons.append("Recipient name only partially matches the beneficiary account.")
+
+            if risk_status == "reported":
+                txn += 0.25
+                contribs.append(
+                    RuleScoreContribution(
+                        feature="beneficiary_prior_report",
+                        value=0.25,
+                        detail="Beneficiary account has prior active bank-transfer risk reports",
+                    )
+                )
+                reasons.append("Beneficiary account has prior risk reports.")
+            elif risk_status == "high_risk":
+                txn += 0.45
+                contribs.append(
+                    RuleScoreContribution(
+                        feature="beneficiary_high_risk",
+                        value=0.45,
+                        detail="Beneficiary account is marked high risk for bank transfers",
+                    )
+                )
+                reasons.append("Beneficiary account is already marked high risk.")
             score += txn
             if event.new_recipient and event.amount_hkd >= 10_000:
                 reasons.append("Large transfer to a new recipient.")

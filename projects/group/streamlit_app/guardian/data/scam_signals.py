@@ -9,6 +9,8 @@ into the existing tool/audit tracing.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -26,6 +28,23 @@ class ScamSignalProvider(ABC):
 
     @abstractmethod
     def search_keywords(self, text: str) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def check_beneficiary_for_bank_transfer(
+        self,
+        recipient_name: str,
+        account_number: str,
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def report_beneficiary_risk_for_bank_transfer(
+        self,
+        *,
+        account_number: str,
+        reason_code: str,
+        recipient_name: str | None = None,
+        case_id: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class ScamDbProvider(ScamSignalProvider):
@@ -84,6 +103,33 @@ class ScamDbProvider(ScamSignalProvider):
             "source": "local",
         }
 
+    def check_beneficiary_for_bank_transfer(
+        self,
+        recipient_name: str,
+        account_number: str,
+    ) -> dict[str, Any]:
+        return {
+            "name_account_check": "unknown",
+            "reported_risk_status": "unknown",
+            "source": "local",
+            "fallback": "bank_review_unavailable",
+        }
+
+    def report_beneficiary_risk_for_bank_transfer(
+        self,
+        *,
+        account_number: str,
+        reason_code: str,
+        recipient_name: str | None = None,
+        case_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": "rejected",
+            "report_id": "",
+            "source": "local",
+            "fallback": "bank_review_unavailable",
+        }
+
 
 class McpScamClient(ScamSignalProvider):
     """HTTP client for the mock MCP scam-signal service."""
@@ -120,6 +166,108 @@ class McpScamClient(ScamSignalProvider):
     def search_keywords(self, text: str) -> dict[str, Any]:
         return self._post("search_keywords", {"text": text})
 
+    def check_beneficiary_for_bank_transfer(
+        self,
+        recipient_name: str,
+        account_number: str,
+    ) -> dict[str, Any]:
+        return {
+            "name_account_check": "unknown",
+            "reported_risk_status": "unknown",
+            "source": "mcp",
+            "fallback": "not_supported_by_scam_mcp",
+        }
+
+    def report_beneficiary_risk_for_bank_transfer(
+        self,
+        *,
+        account_number: str,
+        reason_code: str,
+        recipient_name: str | None = None,
+        case_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": "rejected",
+            "report_id": "",
+            "source": "mcp",
+            "fallback": "not_supported_by_scam_mcp",
+        }
+
+
+class McpBankReviewClient:
+    """MCP client for the bank transfer beneficiary review server."""
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint.rstrip("/")
+
+    def check_beneficiary_for_bank_transfer(
+        self,
+        recipient_name: str,
+        account_number: str,
+    ) -> dict[str, Any]:
+        return self._call_tool(
+            "check_beneficiary_for_bank_transfer",
+            {
+                "recipient_name": recipient_name,
+                "account_number": account_number,
+            },
+        )
+
+    def report_beneficiary_risk_for_bank_transfer(
+        self,
+        *,
+        account_number: str,
+        reason_code: str,
+        recipient_name: str | None = None,
+        case_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self._call_tool(
+            "report_beneficiary_risk_for_bank_transfer",
+            {
+                "account_number": account_number,
+                "reason_code": reason_code,
+                "recipient_name": recipient_name,
+                "case_id": case_id,
+            },
+        )
+
+    def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return asyncio.run(self._call_tool_async(tool_name, arguments))
+
+    async def _call_tool_async(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async with streamable_http_client(self.endpoint) as (
+            read_stream,
+            write_stream,
+            _,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    tool_name,
+                    arguments={k: v for k, v in arguments.items() if v is not None},
+                )
+                structured = getattr(result, "structuredContent", None)
+                if isinstance(structured, dict):
+                    structured.setdefault("source", "bank_review_mcp")
+                    return structured
+
+                content = getattr(result, "content", None)
+                if isinstance(content, list) and content:
+                    text = getattr(content[0], "text", None)
+                    if isinstance(text, str):
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict):
+                            parsed.setdefault("source", "bank_review_mcp")
+                            return parsed
+                raise RuntimeError(f"Unexpected MCP tool result for {tool_name}")
+
 
 class FallbackProvider(ScamSignalProvider):
     """Try MCP first; fall back to local provider on any failure."""
@@ -129,10 +277,12 @@ class FallbackProvider(ScamSignalProvider):
         *,
         mcp: ScamSignalProvider,
         local: ScamSignalProvider,
+        bank_review_mcp: McpBankReviewClient | None = None,
         strict: bool = False,
     ) -> None:
         self._mcp = mcp
         self._local = local
+        self._bank_review_mcp = bank_review_mcp
         self._strict = strict
 
     def lookup_number(self, number: str) -> dict[str, Any]:
@@ -164,6 +314,67 @@ class FallbackProvider(ScamSignalProvider):
             if self._strict:
                 raise
             out = self._local.search_keywords(text)
+            if isinstance(out, dict):
+                out["fallback"] = "local"
+            return out
+
+    def check_beneficiary_for_bank_transfer(
+        self,
+        recipient_name: str,
+        account_number: str,
+    ) -> dict[str, Any]:
+        if self._bank_review_mcp is None:
+            return self._local.check_beneficiary_for_bank_transfer(
+                recipient_name,
+                account_number,
+            )
+        try:
+            return self._bank_review_mcp.check_beneficiary_for_bank_transfer(
+                recipient_name,
+                account_number,
+            )
+        except Exception:
+            if self._strict:
+                raise
+            out = self._local.check_beneficiary_for_bank_transfer(
+                recipient_name,
+                account_number,
+            )
+            if isinstance(out, dict):
+                out["fallback"] = "local"
+            return out
+
+    def report_beneficiary_risk_for_bank_transfer(
+        self,
+        *,
+        account_number: str,
+        reason_code: str,
+        recipient_name: str | None = None,
+        case_id: str | None = None,
+    ) -> dict[str, Any]:
+        if self._bank_review_mcp is None:
+            return self._local.report_beneficiary_risk_for_bank_transfer(
+                account_number=account_number,
+                reason_code=reason_code,
+                recipient_name=recipient_name,
+                case_id=case_id,
+            )
+        try:
+            return self._bank_review_mcp.report_beneficiary_risk_for_bank_transfer(
+                account_number=account_number,
+                reason_code=reason_code,
+                recipient_name=recipient_name,
+                case_id=case_id,
+            )
+        except Exception:
+            if self._strict:
+                raise
+            out = self._local.report_beneficiary_risk_for_bank_transfer(
+                account_number=account_number,
+                reason_code=reason_code,
+                recipient_name=recipient_name,
+                case_id=case_id,
+            )
             if isinstance(out, dict):
                 out["fallback"] = "local"
             return out
