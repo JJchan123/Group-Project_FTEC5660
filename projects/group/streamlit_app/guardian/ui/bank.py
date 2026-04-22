@@ -18,6 +18,7 @@ from guardian.ui.widgets import fmt_hkd, relative_time
 _ASSESSMENT_EXECUTOR_KEY = "bank_transfer_assessment_executor"
 _ASSESSMENT_EVENT_KEY = "bank_transfer_assessment_event"
 _ASSESSMENT_FUTURE_KEY = "bank_transfer_assessment_future"
+_CANCELLED_EVENT_ID_KEY = "bank_transfer_cancelled_event_id"
 
 
 def render() -> None:
@@ -221,13 +222,22 @@ def _finalize_transfer_assessment() -> None:
     if not future.done():
         return
 
-    st.session_state[_ASSESSMENT_FUTURE_KEY] = None
-    st.session_state[_ASSESSMENT_EVENT_KEY] = None
-
     try:
         future.result()
     except Exception as exc:
+        st.session_state[_ASSESSMENT_FUTURE_KEY] = None
+        st.session_state[_ASSESSMENT_EVENT_KEY] = None
         st.error(f"Guardian review failed: {exc}")
+        return
+
+    cancelled_event_id = st.session_state.get(_CANCELLED_EVENT_ID_KEY)
+    if cancelled_event_id == event.id:
+        st.session_state[_ASSESSMENT_FUTURE_KEY] = None
+        st.session_state[_ASSESSMENT_EVENT_KEY] = None
+        st.session_state[_CANCELLED_EVENT_ID_KEY] = None
+        engine: ScenarioEngine = st.session_state["engine"]
+        engine.resolve_pending_transaction()
+        st.info("Transfer cancelled.")
         return
 
     intervention: InterventionAgent = st.session_state["intervention"]
@@ -238,6 +248,8 @@ def _finalize_transfer_assessment() -> None:
     engine: ScenarioEngine = st.session_state["engine"]
     bank.commit_transfer(event)
     engine.resolve_pending_transaction()
+    st.session_state[_ASSESSMENT_FUTURE_KEY] = None
+    st.session_state[_ASSESSMENT_EVENT_KEY] = None
     st.session_state["bank_transfer_success"] = {
         "amount_hkd": event.amount_hkd,
         "to_name": event.to_name,
