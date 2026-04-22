@@ -12,6 +12,8 @@ dependencies = [
   "streamlit-autorefresh>=1.0.1",
   "langchain>=1.0",
   "langchain-openai>=1.0",
+  "mcp[cli]>=1.0",
+  "python-dotenv>=1.0",
   "rich>=13.7",
 ]
 
@@ -23,7 +25,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["guardian*"]
+include = ["guardian*", "bank_mcp*"]
 
 [tool.ruff]
 line-length = 100

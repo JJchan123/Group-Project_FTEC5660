@@ -27,6 +27,7 @@ from guardian.data.event_log import EventLog
 from guardian.data.scam_db import ScamDatabase
 from guardian.data.scam_signals import (
     FallbackProvider,
+    McpBankReviewClient,
     McpScamClient,
     ScamDbProvider,
     ScamSignalProvider,
@@ -95,6 +96,8 @@ def _build_scam_signal_provider(scam_db: ScamDatabase) -> ScamSignalProvider:
     - GUARDIAN_MCP_ENDPOINT: base URL of the HTTP service (e.g. http://127.0.0.1:8765)
     - GUARDIAN_MCP_TIMEOUT_S: request timeout in seconds (default 3.0)
     - GUARDIAN_MCP_ENABLED: optional toggle (1/true/yes/on to enable)
+    - GUARDIAN_BANK_REVIEW_MCP_ENDPOINT: streamable HTTP MCP endpoint
+      (e.g. http://127.0.0.1:8766/mcp) for bank transfer beneficiary review
     - GUARDIAN_MCP_STRICT: if true, MCP is required; no local fallback is used
     """
 
@@ -102,6 +105,9 @@ def _build_scam_signal_provider(scam_db: ScamDatabase) -> ScamSignalProvider:
         return value.strip().lower() in ("1", "true", "yes", "on")
 
     endpoint = os.environ.get("GUARDIAN_MCP_ENDPOINT", "").strip()
+    bank_review_endpoint = os.environ.get(
+        "GUARDIAN_BANK_REVIEW_MCP_ENDPOINT", ""
+    ).strip()
     enabled_raw = os.environ.get("GUARDIAN_MCP_ENABLED", "").strip()
     enabled = _truthy(enabled_raw) if enabled_raw else bool(endpoint)
 
@@ -114,11 +120,23 @@ def _build_scam_signal_provider(scam_db: ScamDatabase) -> ScamSignalProvider:
         timeout_s = 3.0
 
     local = ScamDbProvider(scam_db)
+    bank_review_mcp = (
+        McpBankReviewClient(bank_review_endpoint) if bank_review_endpoint else None
+    )
     if enabled and endpoint:
         mcp = McpScamClient(endpoint, timeout_s=timeout_s)
-        if strict:
-            return mcp
-        return FallbackProvider(mcp=mcp, local=local)
+        return FallbackProvider(
+            mcp=mcp,
+            local=local,
+            bank_review_mcp=bank_review_mcp,
+            strict=strict,
+        )
+    if bank_review_mcp is not None:
+        return FallbackProvider(
+            mcp=local,
+            local=local,
+            bank_review_mcp=bank_review_mcp,
+        )
     return local
 
 
